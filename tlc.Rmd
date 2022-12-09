@@ -1,0 +1,230 @@
+---
+title: "STA4370 Exercise 5"
+author: "Mariya Tabachnikova"
+date: "2022-11-10"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+```
+
+## NYC Taxi 
+
+```{r}
+library(arrow)
+library(tidyverse)
+```
+
+# TLC Trip Record Data
+
+```{r}
+tlc <- read_parquet(file = "~/Documents/data/yellow_tripdata_2022-06.parquet")
+```
+
+```{r}
+str(tlc)
+```
+
+```{r}
+library(lubridate)
+```
+
+
+```{r}
+tlc <- tlc %>% 
+  mutate(
+    date_pickup = date(tpep_pickup_datetime),
+    date_dropoff = date(tpep_dropoff_datetime),
+    hour_pickup = hours(tpep_pickup_datetime), 
+    hour_dropoff = hours(tpep_dropoff_datetime),
+    weekday_pickup = wday(tpep_pickup_datetime, label = TRUE),
+    day_pickup = day(tpep_pickup_datetime)
+    )
+```
+
+
+```{r}
+tlc %>% group_by(weekday_pickup) %>% 
+  tally %>% 
+  ggplot(aes(x = weekday_pickup, y = n)) + geom_bar(stat = "identity") 
+```
+
+
+```{r}
+tlc %>% group_by(weekday_pickup) %>% 
+  summarise(mean_passanger = mean(passenger_count, na.rm = TRUE)) %>% 
+  ggplot(aes(x = weekday_pickup, y = mean_passanger)) + geom_bar(stat = "identity") 
+```
+
+
+```{r}
+tlc %>% group_by(day_pickup) %>% 
+  tally %>% 
+  ggplot(aes(x = day_pickup, y = n)) + geom_line()
+```
+
+# Geographic
+
+```{r}
+library(sf)
+library(ggmap)
+```
+
+
+```{r}
+tlc_zone <- st_read("~/Documents/taxi_zones/taxi_zones.shp", quiet = TRUE)
+
+plot(tlc_zone)
+```
+
+
+
+```{r}
+tlc_zone <- st_transform(tlc_zone, crs = 4326)
+ ggplot(tlc_zone) + geom_sf() + theme_inset()
+```
+
+
+```{r}
+our_neighborhood <- tlc_zone %>% 
+  filter(zone == "Gramercy"|zone == "Kips Bay")
+
+ggplot(tlc_zone) + geom_sf() + theme_inset() +
+  geom_sf(data = our_neighborhood, fill = "red")
+```
+
+```{r}
+bbox <- st_bbox(tlc_zone) %>% as.numeric
+
+nyc_map <- get_stamenmap(bbox = bbox, messaging = FALSE, zoom = 11, 
+                         maptype = "toner-lite", format = c("png"))
+
+ggmap(nyc_map) + 
+  geom_sf(data = our_neighborhood, fill = "red", inherit.aes = FALSE)
+```
+
+
+```{r, eval = TRUE, echo = FALSE}
+pu_count <- tlc %>%
+  group_by(PULocationID) %>% 
+  summarise(N= n()) %>%
+  rename(LocationID = PULocationID)
+
+joined_tbl <- left_join(tlc_zone, pu_count, by = "LocationID") %>% filter(borough == "Manhattan")
+
+ggplot(joined_tbl) + geom_sf() + aes(fill = N)
+ 
+#ggplot(joined_tbl %>%  filter(borough == "Manhattan")) + geom_sf() + aes(fill = N) + 
+ # scale_fill_viridis_c(option = "A")
+```
+
+```{r}
+#inherit.aes to use coordinates from data table, not nyc_map
+
+ggmap(nyc_map) + geom_sf(data = joined_tbl, aes(fill = N), inherit.aes = FALSE) +
+  scale_fill_viridis_c(option = "A")
+```
+
+## Creating our own
+
+```{r}
+random_locs <- st_sample(our_neighborhood, type = "random", size = 10)
+ggplot() + geom_sf(data = our_neighborhood) + geom_sf(data = random_locs)
+```
+
+## Looping Over Zones
+
+```{r}
+tlc_zone_manhattan <- tlc_zone %>% filter(borough == "Manhattan")
+
+bbox_manhattan <- st_bbox(tlc_zone_manhattan) %>% as.numeric
+
+manhattan_map <- get_stamenmap(bbox = bbox_manhattan, messaging = FALSE, zoom = 11, 
+                         maptype = "toner-lite", format = c("png"))
+
+
+storage <- list()
+map_output <- ggmap(manhattan_map)
+
+for (zone_id in 1:nrow(joined_tbl)){
+  zone <- joined_tbl[zone_id, ]
+  zone$N[is.na(zone$N)] <- 0
+  sampled_points <- zone %>% st_sample(type = "random",
+                                       size = round(zone$N/100))
+  storage[[zone_id]] <- sampled_points
+  map_output <- map_output + geom_sf(data = storage[[zone_id]], 
+                                         inherit.aes = FALSE,
+                                         size = 0.1, alpha = 0.1)
+}
+
+# if you do not specify manhattan in tlc_zone, use xlim and ylim to specify
+# which part of the map you want:
+# map_output + xlim(-74.05, -73.9) + ylim(c(40.655, 40.855))
+
+map_output
+
+```
+
+## Now let's use our tools on Airbnb data
+
+```{r}
+airbnb <- read_csv("~/Documents/data/listings.csv")
+```
+
+```{r}
+airbnb_sf <- airbnb %>% 
+  select(longitude, latitude, price) %>%
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326)
+
+joined_sf <- st_join(tlc_zone, airbnb_sf)
+summary_sf <- joined_sf %>% group_by(zone) %>%
+              summarise(N = n(), mean_price = mean(price, na.rm = TRUE))
+
+ggmap(nyc_map) +
+  geom_sf(data = summary_sf, aes(fill = mean_price),
+          inherit.aes = FALSE) +
+  scale_fill_viridis_c(option = "B")
+
+ggmap(nyc_map) +
+  geom_sf(data = summary_sf, aes(fill = N),
+          inherit.aes = FALSE) +
+  scale_fill_viridis_c(option = "B")
+```
+
+## NYC Tree data
+
+```{r}
+nyc_tree <- read_csv("~/Documents/data/2015_Street_Tree_Census_-_Tree_Data.csv")
+
+nyc_tree <- nyc_tree %>%
+            select(longitude, latitude, tree_dbh) %>%
+            st_as_sf(coords = c("longitude", "latitude"), crs = 4326)
+
+# ggplot(nyc_tree) + geom_sf()
+
+joined_sf <- st_join(tlc_zone, nyc_tree %>% sample_n(1000))
+summary_sf <- joined_sf %>% group_by(zone) %>% 
+              summarise(N = n(), mean_dbh = mean(tree_dbh, na.rm = TRUE))
+
+ggmap(nyc_map) +
+  geom_sf(data = summary_sf, aes(fill = mean_dbh),
+          inherit.aes = FALSE) +
+  scale_fill_viridis_c(option = "B")
+
+ggmap(nyc_map) +
+  geom_sf(data = summary_sf, aes(fill = N),
+          inherit.aes = FALSE) +
+  scale_fill_viridis_c(option = "B")
+
+```
+
+
+
+
+
+
+
+
